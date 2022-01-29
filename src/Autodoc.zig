@@ -5,14 +5,14 @@ const Module = @import("Module.zig");
 const Zir = @import("Zir.zig");
 
 module: *Module,
-doc_location: ?Compilation.EmitLoc,
+doc_location: Compilation.EmitLoc,
 arena: std.mem.Allocator,
 types: std.ArrayListUnmanaged(DocData.Type) = .{},
 decls: std.ArrayListUnmanaged(DocData.Decl) = .{},
 ast_nodes: std.ArrayListUnmanaged(DocData.AstNode) = .{},
 
 var arena_allocator: std.heap.ArenaAllocator = undefined;
-pub fn init(m: *Module, doc_location: ?Compilation.EmitLoc) Autodoc {
+pub fn init(m: *Module, doc_location: Compilation.EmitLoc) Autodoc {
     arena_allocator = std.heap.ArenaAllocator.init(m.gpa);
     return .{
         .module = m,
@@ -22,14 +22,12 @@ pub fn init(m: *Module, doc_location: ?Compilation.EmitLoc) Autodoc {
 }
 
 pub fn generateZirData(self: *Autodoc) !void {
-    if (self.doc_location) |loc| {
-        if (loc.directory) |dir| {
-            if (dir.path) |path| {
-                std.debug.print("path: {s}\n", .{path});
-            }
+    if (self.doc_location.directory) |dir| {
+        if (dir.path) |path| {
+            std.debug.print("path: {s}\n", .{path});
         }
-        std.debug.print("basename: {s}\n", .{loc.basename});
     }
+    std.debug.print("basename: {s}\n", .{self.doc_location.basename});
 
     var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const dir =
@@ -72,7 +70,23 @@ pub fn generateZirData(self: *Autodoc) !void {
 
     data.packages[0].main = main_type_index.type;
 
-    const out = std.io.getStdOut().writer();
+    if (self.doc_location.directory) |d|
+        (d.handle.makeDir(self.doc_location.basename) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => unreachable,
+        })
+    else
+        (self.module.zig_cache_artifact_directory.handle.makeDir(self.doc_location.basename) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => unreachable,
+        });
+    const output_dir = if (self.doc_location.directory) |d|
+        (d.handle.openDir(self.doc_location.basename, .{}) catch unreachable)
+    else
+        (self.module.zig_cache_artifact_directory.handle.openDir(self.doc_location.basename, .{}) catch unreachable);
+    const data_js_f = output_dir.createFile("data.js", .{}) catch unreachable;
+    defer data_js_f.close();
+    const out = data_js_f.writer();
     out.print("zigAnalysis=", .{}) catch unreachable;
     std.json.stringify(
         data,
@@ -83,6 +97,12 @@ pub fn generateZirData(self: *Autodoc) !void {
         out,
     ) catch unreachable;
     out.print(";", .{}) catch unreachable;
+    // copy main.js, index.html
+    const special = try self.module.comp.zig_lib_directory.join(gpa, &.{ "std", "special", "docs", std.fs.path.sep_str });
+    var special_dir = std.fs.openDirAbsolute(special, .{}) catch unreachable;
+    defer special_dir.close();
+    special_dir.copyFile("main.js", output_dir, "main.js", .{}) catch unreachable;
+    special_dir.copyFile("index.html", output_dir, "index.html", .{}) catch unreachable;
 }
 
 const Scope = struct {
